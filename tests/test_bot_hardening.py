@@ -75,6 +75,128 @@ class RiskAndVolatilityTests(unittest.TestCase):
         self.assertTrue(kwargs["volatility_high"])
         bot.order_mgr.place_market_order.assert_not_called()
 
+    def test_evaluate_trade_does_not_block_entry_when_ai_rejects_in_advisory_mode(self):
+        bot = main.TradingBot.__new__(main.TradingBot)
+        bot.risk_mgr = MagicMock()
+        bot.risk_mgr.can_trade.return_value = {"allowed": True, "reasons": []}
+        bot.risk_mgr.get_adjusted_risk.return_value = 0.01
+        bot.telegram = MagicMock()
+        bot.ai_analyzer = MagicMock()
+        bot.ai_analyzer.analyze_market.return_value = {
+            "confirmed": False,
+            "confidence": 0.2,
+            "reasoning": "wait",
+            "risk_level": "HIGH",
+        }
+        bot.position_sizer = MagicMock()
+        bot.position_sizer.calculate_sl_tp.return_value = {
+            "stop_loss": 1980,
+            "take_profit": 2040,
+            "rr_ratio": 2.0,
+        }
+        bot.position_sizer.calculate_position.return_value = {
+            "valid": True,
+            "contracts": 0.01,
+            "risk_amount": 2.5,
+        }
+        bot.order_mgr = MagicMock()
+        bot.order_mgr.place_market_order.return_value = {"status": "open", "order_id": "1"}
+        bot.exchange_mgr = MagicMock()
+        bot.exchange_mgr.get_balance.return_value = {"total": 500}
+        bot._current_news_sentiment = None
+        bot._last_ai_analysis = 0
+        bot._current_ai_analysis = None
+
+        signal = {"action": "LONG", "confidence": 0.9, "atr": 10, "indicators": {}}
+        balance = {"total": 500, "free": 500}
+
+        bot._evaluate_trade(signal, balance, [], 2000)
+
+        bot.order_mgr.place_market_order.assert_called_once()
+        self.assertEqual(bot._current_ai_analysis["risk_level"], "HIGH")
+
+    def test_manage_positions_closes_early_when_ai_exit_advisor_flags_bad_conditions(self):
+        bot = main.TradingBot.__new__(main.TradingBot)
+        bot.data_fetcher = MagicMock()
+        bot.data_fetcher.fetch_ohlcv.return_value = MagicMock()
+        analyzed = MagicMock()
+        analyzed.empty = False
+        analyzed.iloc.__getitem__.return_value = {"atr": 10}
+        bot.analyzer = MagicMock()
+        bot.analyzer.calculate_all.return_value = analyzed
+        bot.position_sizer = MagicMock()
+        bot.position_sizer.calculate_sl_tp.return_value = {
+            "trailing_activation": 15,
+            "trailing_distance": 5,
+        }
+        bot.order_mgr = MagicMock()
+        bot.order_mgr.update_trailing_stop.return_value = False
+        bot.order_mgr.close_position.return_value = {"status": "closed", "pnl": -12}
+        bot.risk_mgr = MagicMock()
+        bot.telegram = MagicMock()
+        bot.exchange_mgr = MagicMock()
+        bot.exchange_mgr.get_balance.return_value = {"total": 488}
+        bot._current_news_sentiment = {
+            "should_pause": True,
+            "impact_level": "HIGH",
+            "reasoning": "macro risk",
+        }
+        bot._current_ai_analysis = None
+        bot.ai_analyzer = MagicMock()
+        bot.ai_analyzer.analyze_exit_risk.return_value = {
+            "close_early": True,
+            "confidence": 0.83,
+            "reasoning": "News risk elevated",
+            "urgency": "HIGH",
+        }
+
+        positions = [{"symbol": "ETHUSDT", "entry_price": 2000, "side": "long", "size": 0.1}]
+
+        bot._manage_positions(positions, 1988)
+
+        bot.order_mgr.close_position.assert_called_once_with("ETHUSDT")
+        close_payload = bot.telegram.notify_trade_close.call_args.args[0]
+        self.assertEqual(close_payload["exit_reason"], "ai_risk_exit")
+
+    def test_manage_positions_keeps_trade_when_ai_exit_advisor_says_hold(self):
+        bot = main.TradingBot.__new__(main.TradingBot)
+        bot.data_fetcher = MagicMock()
+        bot.data_fetcher.fetch_ohlcv.return_value = MagicMock()
+        analyzed = MagicMock()
+        analyzed.empty = False
+        analyzed.iloc.__getitem__.return_value = {"atr": 10}
+        bot.analyzer = MagicMock()
+        bot.analyzer.calculate_all.return_value = analyzed
+        bot.position_sizer = MagicMock()
+        bot.position_sizer.calculate_sl_tp.return_value = {
+            "trailing_activation": 15,
+            "trailing_distance": 5,
+        }
+        bot.order_mgr = MagicMock()
+        bot.order_mgr.update_trailing_stop.return_value = False
+        bot.risk_mgr = MagicMock()
+        bot.telegram = MagicMock()
+        bot.exchange_mgr = MagicMock()
+        bot._current_news_sentiment = {
+            "should_pause": True,
+            "impact_level": "HIGH",
+            "reasoning": "macro risk",
+        }
+        bot._current_ai_analysis = None
+        bot.ai_analyzer = MagicMock()
+        bot.ai_analyzer.analyze_exit_risk.return_value = {
+            "close_early": False,
+            "confidence": 0.41,
+            "reasoning": "Hold for now",
+            "urgency": "LOW",
+        }
+
+        positions = [{"symbol": "ETHUSDT", "entry_price": 2000, "side": "long", "size": 0.1}]
+
+        bot._manage_positions(positions, 1988)
+
+        bot.order_mgr.close_position.assert_not_called()
+
 
 class BacktestAndAiContextTests(unittest.TestCase):
     def test_backtest_config_downloads_hourly_timeframe_for_higher_tf_bias(self):

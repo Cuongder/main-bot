@@ -64,6 +64,7 @@ class TradingBot:
         self._current_news_sentiment = None
         self._current_ai_analysis = None
         self._cycle_count = 0
+        self._last_exit_ai_analysis = 0
 
         # Dashboard data (shared with dashboard server)
         self.dashboard_data = {
@@ -198,7 +199,7 @@ class TradingBot:
                 self.telegram.notify_circuit_breaker(reason)
             return
 
-        # AI confirmation (every 15 minutes or on strong signals)
+        # AI advisory (never blocks entry)
         now = time.time()
         if now - self._last_ai_analysis >= AI_ANALYSIS_INTERVAL or signal['confidence'] >= 0.8:
             logger.info("🧠 Requesting AI analysis...")
@@ -209,15 +210,14 @@ class TradingBot:
             )
             self._current_ai_analysis = ai_result
             self._last_ai_analysis = now
+            ai_result['entry_advisory_only'] = True
+            ai_result['confirmed'] = True
 
-            if not ai_result.get('confirmed', False):
-                logger.info(f"🧠 AI rejected trade: {ai_result.get('reasoning', 'No reason')}")
-                return
 
             logger.info(
-                f"🧠 AI confirmed: {ai_result.get('suggested_action')} | "
+                f"🧠 AI advisory: {ai_result.get('suggested_action')} | "
                 f"Confidence: {ai_result.get('confidence', 0):.2%} | "
-                f"Risk: {ai_result.get('risk_level', 'UNKNOWN')}"
+                f"Risk: {ai_result.get('risk_level', 'UNKNOWN')} | Reason: {ai_result.get('reasoning', 'n/a')}"
             )
 
         # Calculate position size
@@ -310,6 +310,27 @@ class TradingBot:
                                 'exit_reason': 'trailing_stop',
                                 'balance_after': self.exchange_mgr.get_balance()['total'],
                             })
+                            continue
+
+                    if self._should_request_ai_exit_review(pos):
+                        exit_review = self._review_position_exit(pos, current_price, atr)
+                        if exit_review.get('close_early'):
+                            result = self.order_mgr.close_position(pos['symbol'])
+                            if result.get('status') == 'closed':
+                                pnl = result.get('pnl', 0)
+                                self.risk_mgr.record_trade_result(pnl, pnl > 0)
+                                self.telegram.notify_trade_close({
+                                    'symbol': pos['symbol'],
+                                    'exit_price': current_price,
+                                    'pnl': pnl,
+                                    'pnl_pct': self._calculate_pnl_pct(
+                                        pnl,
+                                        entry_price,
+                                        pos.get('size', 0),
+                                    ),
+                                    'exit_reason': 'ai_risk_exit',
+                                    'balance_after': self.exchange_mgr.get_balance()['total'],
+                                })
             except Exception as e:
                 logger.error(f"❌ Position management error: {e}")
 
@@ -480,6 +501,37 @@ class TradingBot:
             return (exit_price - entry_price) * amount
         return (entry_price - exit_price) * amount
 
+    def _should_request_ai_exit_review(self, position: dict) -> bool:
+        """Request AI review only when market context looks adverse."""
+        news = self._current_news_sentiment or {}
+        impact = str(news.get('impact_level', '')).upper()
+        return news.get('should_pause', False) or impact in {'HIGH', 'EXTREME'}
+
+    def _review_position_exit(self, position: dict, current_price: float, atr: float) -> dict:
+        """Ask AI whether to close an open trade early under adverse conditions."""
+        now = time.time()
+        last_review = getattr(self, '_last_exit_ai_analysis', 0)
+        if now - last_review < AI_ANALYSIS_INTERVAL:
+            return {
+                'close_early': False,
+                'confidence': 0,
+                'reasoning': 'Exit AI cooldown',
+                'urgency': 'LOW',
+            }
+
+        indicators = {
+            'atr': atr,
+            'high_volatility': (getattr(self, 'dashboard_data', {}).get('last_signal') or {}).get('high_volatility', False),
+        }
+        result = self.ai_analyzer.analyze_exit_risk(
+            position=position,
+            current_price=current_price,
+            indicators=indicators,
+            news_sentiment=self._current_news_sentiment,
+        )
+        self._last_exit_ai_analysis = now
+        return result
+
 
 def run_backtest():
     """Run backtesting with historical data"""
@@ -562,3 +614,4 @@ if __name__ == '__main__':
         exchange_mgr.load_markets()
         collector = DataCollector(exchange_mgr.exchange)
         collector.download_all_timeframes()
+

@@ -13,7 +13,7 @@ from utils.logger import logger
 class AIAnalyzer:
     """
     Uses AI model to analyze market conditions and confirm trade signals.
-    Acts as the final decision gate before order placement.
+    Acts as an advisory layer for entries and a risk reviewer for exits.
     """
 
     def __init__(self):
@@ -195,6 +195,61 @@ class AIAnalyzer:
                 'reasoning': f'Parse error: {str(e)}'
             }
 
+    def analyze_exit_risk(self, position: dict, current_price: float,
+                          indicators: dict = None, news_sentiment: dict = None) -> dict:
+        """
+        Ask AI whether adverse market conditions justify an early exit.
+
+        Returns:
+            dict with: close_early (bool), confidence, reasoning, urgency
+        """
+        indicators = indicators or {}
+        news_sentiment = news_sentiment or {}
+
+        prompt = self._build_exit_prompt(position, current_price, indicators, news_sentiment)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert crypto futures risk manager. "
+                    "Review the open position and current adverse conditions. "
+                    "Respond ONLY in valid JSON: "
+                    '{"close_early": true/false, "confidence": 0.0-1.0, '
+                    '"reasoning": "brief explanation", "urgency": "LOW/MEDIUM/HIGH"}'
+                )
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+
+        response = self.call_ai_sync(messages, max_tokens=300)
+        if not response:
+            return {
+                'close_early': False,
+                'confidence': 0,
+                'reasoning': 'AI unavailable',
+                'urgency': 'LOW',
+            }
+
+        try:
+            result = self._extract_json(response)
+            return {
+                'close_early': bool(result.get('close_early', False)),
+                'confidence': float(result.get('confidence', 0)),
+                'reasoning': result.get('reasoning', ''),
+                'urgency': result.get('urgency', 'LOW'),
+            }
+        except Exception as e:
+            logger.error(f"❌ Failed to parse exit risk analysis: {e}")
+            return {
+                'close_early': False,
+                'confidence': 0,
+                'reasoning': f'Parse error: {str(e)}',
+                'urgency': 'LOW',
+            }
+
     def _build_analysis_prompt(self, signal: dict, indicators: dict, news_sentiment: dict = None) -> str:
         """Build comprehensive analysis prompt"""
         parts = [
@@ -248,6 +303,48 @@ class AIAnalyzer:
             "Focus on: trend alignment, momentum, volatility, and risk/reward."
         ])
 
+        return "\n".join(parts)
+
+    def _build_exit_prompt(self, position: dict, current_price: float,
+                           indicators: dict, news_sentiment: dict) -> str:
+        """Build risk-review prompt for an open position."""
+        side = str(position.get('side', '')).upper()
+        entry_price = float(position.get('entry_price', 0) or 0)
+        size = float(position.get('size', position.get('amount', 0)) or 0)
+        unrealized_pnl = float(position.get('unrealized_pnl', 0) or 0)
+
+        parts = [
+            "## Open Position Risk Review",
+            f"**Pair**: {position.get('symbol', 'ETHUSDT')}",
+            f"**Side**: {side}",
+            f"**Entry Price**: ${entry_price:.2f}",
+            f"**Current Price**: ${current_price:.2f}",
+            f"**Size**: {size:.4f}",
+            f"**Unrealized PnL**: ${unrealized_pnl:+.2f}",
+        ]
+
+        if indicators:
+            parts.extend([
+                "",
+                "### Market Context:",
+                f"- ATR: ${float(indicators.get('atr', 0) or 0):.2f}",
+                f"- High Volatility: {'YES' if indicators.get('high_volatility') else 'NO'}",
+            ])
+
+        if news_sentiment:
+            parts.extend([
+                "",
+                "### News Context:",
+                f"- Should Pause: {'YES' if news_sentiment.get('should_pause') else 'NO'}",
+                f"- Impact Level: {news_sentiment.get('impact_level', 'UNKNOWN')}",
+                f"- Direction: {news_sentiment.get('expected_direction', 'NEUTRAL')}",
+                f"- Reasoning: {news_sentiment.get('reasoning', '')}",
+            ])
+
+        parts.extend([
+            "",
+            "Given the adverse context, should this position be closed early now?"
+        ])
         return "\n".join(parts)
 
     def _parse_ai_response(self, response: str, signal: dict) -> dict:
