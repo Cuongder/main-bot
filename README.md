@@ -31,6 +31,30 @@ python preflight_check.py --live-order-smoke --symbol ETH/USDT --amount 0.01
 python main.py trade
 ```
 
+## PM2 On Ubuntu
+
+Install PM2:
+
+```bash
+sudo npm install -g pm2
+```
+
+Start with the bundled config:
+
+```bash
+pm2 start ecosystem.config.js
+pm2 save
+pm2 startup
+```
+
+Useful commands:
+
+```bash
+pm2 status
+pm2 logs main-bot
+pm2 restart main-bot
+```
+
 ## Useful Commands
 
 - `python main.py backtest`

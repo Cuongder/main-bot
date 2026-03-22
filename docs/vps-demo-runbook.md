@@ -49,6 +49,14 @@ python preflight_check.py --live-order-smoke --symbol ETH/USDT --amount 0.01
 python main.py trade
 ```
 
+Or with PM2 on Ubuntu:
+
+```bash
+pm2 start ecosystem.config.js
+pm2 save
+pm2 startup
+```
+
 ## What good looks like
 
 - Binance returns non-zero balance and live price.
